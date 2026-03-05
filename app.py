@@ -3,15 +3,16 @@ Heating Coherence Diagnostic - MVP
 Analyse la cohérence du chauffage via capteur intérieur HA + météo Open-Meteo
 """
 
+import base64
 import io
 import json
+import os
 import warnings
 from datetime import datetime, timezone
 
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -249,57 +250,62 @@ def compute_diagnostics(
 # ──────────────────────────────────────────────
 
 def make_charts(df: pd.DataFrame, diag: dict) -> tuple:
-    """Génère les 3 figures matplotlib."""
+    """Génère les 3 figures Plotly interactives."""
     comfort_min = diag["comfort_min"]
     comfort_max = diag["comfort_max"]
     times = df["ts_hour"]
 
-    # ── Chart 1: temp_int vs temp_ext ──
-    fig1, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(times, df["temp_int"], label="Intérieur", color="#E84545", linewidth=1.5)
-    ax1.plot(times, df["temp_ext"], label="Extérieur", color="#4A90D9", linewidth=1.2, alpha=0.8)
-    ax1.axhline(comfort_min, color="orange", linestyle="--", linewidth=0.8, alpha=0.7, label=f"Min confort {comfort_min}°C")
-    ax1.axhline(comfort_max, color="red", linestyle="--", linewidth=0.8, alpha=0.7, label=f"Max confort {comfort_max}°C")
+    chart_layout = dict(
+        template="plotly_white",
+        paper_bgcolor="rgba(255,255,255,0.75)",
+        plot_bgcolor="rgba(255,255,255,0.6)",
+        hovermode="x unified",
+        margin=dict(l=50, r=20, t=40, b=40),
+        font=dict(color="#1a1a2e"),
+    )
 
-    # Anomalies
+    # ── Chart 1: temp_int vs temp_ext ──
+    fig1 = go.Figure()
+    fig1.add_trace(go.Scatter(x=times, y=df["temp_int"], name="Intérieur", line=dict(color="#E84545", width=2),
+                              hovertemplate="%{y:.1f}°C"))
+    fig1.add_trace(go.Scatter(x=times, y=df["temp_ext"], name="Extérieur", line=dict(color="#4A90D9", width=1.5),
+                              opacity=0.8, hovertemplate="%{y:.1f}°C"))
+    fig1.add_hline(y=comfort_min, line_dash="dash", line_color="orange", opacity=0.7,
+                   annotation_text=f"Min {comfort_min}°C", annotation_position="top left")
+    fig1.add_hline(y=comfort_max, line_dash="dash", line_color="red", opacity=0.7,
+                   annotation_text=f"Max {comfort_max}°C", annotation_position="top left")
+
     under = df[df["temp_int"] < comfort_min]
     over = df[df["temp_int"] > comfort_max]
     if not under.empty:
-        ax1.scatter(under["ts_hour"], under["temp_int"], color="blue", s=15, zorder=5, label="Sous-chauffe", alpha=0.6)
+        fig1.add_trace(go.Scatter(x=under["ts_hour"], y=under["temp_int"], mode="markers", name="Sous-chauffe",
+                                  marker=dict(color="blue", size=5, opacity=0.6), hovertemplate="%{y:.1f}°C"))
     if not over.empty:
-        ax1.scatter(over["ts_hour"], over["temp_int"], color="darkred", s=15, zorder=5, label="Surchauffe", alpha=0.6)
+        fig1.add_trace(go.Scatter(x=over["ts_hour"], y=over["temp_int"], mode="markers", name="Surchauffe",
+                                  marker=dict(color="darkred", size=5, opacity=0.6), hovertemplate="%{y:.1f}°C"))
 
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %Hh"))
-    plt.xticks(rotation=45)
-    ax1.set_ylabel("°C")
-    ax1.set_title("Température intérieure vs extérieure")
-    ax1.legend(fontsize=8, loc="upper right")
-    ax1.grid(True, alpha=0.3)
-    fig1.tight_layout()
+    fig1.update_layout(**chart_layout, title="Température intérieure vs extérieure",
+                       yaxis_title="°C", height=400, xaxis=dict(tickformat="%d/%m %Hh"))
 
     # ── Chart 2: delta ──
-    fig2, ax2 = plt.subplots(figsize=(12, 3))
-    ax2.fill_between(times, df["delta"], alpha=0.5, color="#5C6BC0", label="Δ int - ext")
-    ax2.plot(times, df["delta"], color="#3949AB", linewidth=1)
-    ax2.axhline(0, color="black", linewidth=0.8)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %Hh"))
-    plt.xticks(rotation=45)
-    ax2.set_ylabel("ΔT (°C)")
-    ax2.set_title("Écart thermique (intérieur - extérieur)")
-    ax2.grid(True, alpha=0.3)
-    fig2.tight_layout()
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=times, y=df["delta"], fill="tozeroy", name="Δ int - ext",
+                              line=dict(color="#3949AB", width=1.5), fillcolor="rgba(92,107,192,0.4)",
+                              hovertemplate="%{y:.1f}°C"))
+    fig2.add_hline(y=0, line_color="black", line_width=0.8)
+    fig2.update_layout(**chart_layout, title="Écart thermique (intérieur - extérieur)",
+                       yaxis_title="ΔT (°C)", height=300, xaxis=dict(tickformat="%d/%m %Hh"))
 
     # ── Chart 3: histogramme temp_int ──
-    fig3, ax3 = plt.subplots(figsize=(7, 4))
-    ax3.hist(df["temp_int"], bins=30, color="#66BB6A", edgecolor="white", linewidth=0.5)
-    ax3.axvline(comfort_min, color="orange", linestyle="--", linewidth=1.5, label=f"Min {comfort_min}°C")
-    ax3.axvline(comfort_max, color="red", linestyle="--", linewidth=1.5, label=f"Max {comfort_max}°C")
-    ax3.set_xlabel("Température intérieure (°C)")
-    ax3.set_ylabel("Heures")
-    ax3.set_title("Distribution de la température intérieure")
-    ax3.legend()
-    ax3.grid(True, alpha=0.3, axis="y")
-    fig3.tight_layout()
+    fig3 = go.Figure()
+    fig3.add_trace(go.Histogram(x=df["temp_int"], nbinsx=30, marker_color="#66BB6A",
+                                hovertemplate="Temp: %{x:.1f}°C<br>Count: %{y}"))
+    fig3.add_vline(x=comfort_min, line_dash="dash", line_color="orange", line_width=2,
+                   annotation_text=f"Min {comfort_min}°C")
+    fig3.add_vline(x=comfort_max, line_dash="dash", line_color="red", line_width=2,
+                   annotation_text=f"Max {comfort_max}°C")
+    fig3.update_layout(**chart_layout, title="Distribution de la température intérieure",
+                       xaxis_title="Température intérieure (°C)", yaxis_title="Heures", height=400)
 
     return fig1, fig2, fig3
 
@@ -330,22 +336,53 @@ def render_streamlit_ui():
         layout="wide",
     )
 
-    # CSS minimal
-    st.markdown("""
-    <style>
-    .kpi-box {
-        background: #1e1e2e;
-        border-radius: 10px;
-        padding: 16px 20px;
-        text-align: center;
-        border: 1px solid #313244;
-    }
-    .kpi-val { font-size: 2rem; font-weight: bold; color: #cdd6f4; }
-    .kpi-label { font-size: 0.85rem; color: #a6adc8; margin-top: 4px; }
-    .verdict-ok { background: #1a3a2a; border-left: 4px solid #40a02b; padding: 12px 16px; border-radius: 6px; }
-    .verdict-warn { background: #3a2a1a; border-left: 4px solid #fe640b; padding: 12px 16px; border-radius: 6px; }
-    </style>
-    """, unsafe_allow_html=True)
+    # Background image + CSS
+    bg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ImageFond.png")
+    bg_css = ""
+    if os.path.exists(bg_path):
+        with open(bg_path, "rb") as f:
+            bg_b64 = base64.b64encode(f.read()).decode()
+        bg_css = (
+            '[data-testid="stAppViewContainer"] {'
+            f'  background-image: linear-gradient(rgba(255,255,255,0.7), rgba(255,255,255,0.7)), url("data:image/png;base64,{bg_b64}");'
+            '  background-size: cover;'
+            '  background-position: center;'
+            '  background-attachment: fixed;'
+            '}'
+            '[data-testid="stSidebar"] {'
+            '  background: rgba(255, 255, 255, 0.88);'
+            '}'
+            '[data-testid="stHeader"] {'
+            '  background: transparent;'
+            '}'
+            'html, body, [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] * {'
+            '  color: #1a1a2e;'
+            '}'
+            'h1, h2, h3, h4, h5, h6, .stMarkdown p, .stMarkdown li, label, .stRadio label span,'
+            '[data-testid="stMetricValue"], [data-testid="stMetricLabel"], [data-testid="stCaption"] {'
+            '  color: #1a1a2e !important;'
+            '}'
+            '[data-testid="stMetricDelta"] { color: #555 !important; }'
+        )
+
+    st.markdown(
+        "<style>"
+        + bg_css
+        + ".kpi-box {"
+        "  background: rgba(255, 255, 255, 0.85);"
+        "  border-radius: 10px;"
+        "  padding: 16px 20px;"
+        "  text-align: center;"
+        "  border: 1px solid #ddd;"
+        "  backdrop-filter: blur(4px);"
+        "}"
+        ".kpi-val { font-size: 2rem; font-weight: bold; color: #1a1a2e !important; }"
+        ".kpi-label { font-size: 0.85rem; color: #555 !important; margin-top: 4px; }"
+        ".verdict-ok { background: rgba(220, 255, 220, 0.85); border-left: 4px solid #40a02b; padding: 12px 16px; border-radius: 6px; color: #1a3a2a !important; }"
+        ".verdict-warn { background: rgba(255, 235, 210, 0.85); border-left: 4px solid #fe640b; padding: 12px 16px; border-radius: 6px; color: #3a2a1a !important; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
 
     st.title("🏠 Diagnostic Cohérence Chauffage")
     st.caption("Analyse votre historique Home Assistant × météo Open-Meteo pour diagnostiquer votre chauffage.")
@@ -494,13 +531,11 @@ def render_streamlit_ui():
     st.subheader("📉 Visualisations")
     fig1, fig2, fig3 = make_charts(df_final, diag)
 
-    st.pyplot(fig1)
-    st.pyplot(fig2)
+    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True)
     col_hist, _ = st.columns([1, 1])
     with col_hist:
-        st.pyplot(fig3)
-
-    plt.close("all")
+        st.plotly_chart(fig3, use_container_width=True)
 
     # ── PRESCRIPTION ──
     st.markdown("---")
